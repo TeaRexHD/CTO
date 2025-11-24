@@ -5,14 +5,19 @@ import { Car } from '../engine/Car';
 import { PhysicsEngine } from '../engine/PhysicsEngine';
 import { CameraController } from '../engine/CameraController';
 import { getRandomAIProfile, CAR_COLORS } from '../engine/AIProfiles';
+import { RaceDirector } from '../engine/RaceDirector';
+import TelemetryPanel from './TelemetryPanel';
 
 const RaceSimulator = () => {
   const mountRef = useRef(null);
+  const raceDirectorRef = useRef(null);
+  const telemetryTickRef = useRef(0);
   const [stats, setStats] = useState({
     fps: 0,
     carCount: 20,
     cameraMode: 'topdown'
   });
+  const [telemetrySnapshot, setTelemetrySnapshot] = useState(null);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -73,6 +78,9 @@ const RaceSimulator = () => {
       scene.add(car.mesh);
     }
 
+    const raceDirector = new RaceDirector(track, cars);
+    raceDirectorRef.current = raceDirector;
+
     const physicsEngine = new PhysicsEngine();
     const cameraController = new CameraController(camera);
     cameraController.setTargetCar(cars[0]);
@@ -86,6 +94,7 @@ const RaceSimulator = () => {
       const currentTime = performance.now();
       const deltaTime = Math.min((currentTime - lastTime) / 1000, 0.033);
       lastTime = currentTime;
+      const raceDirectorInstance = raceDirectorRef.current;
 
       frameCount++;
       fpsTime += deltaTime;
@@ -109,13 +118,29 @@ const RaceSimulator = () => {
 
       for (let i = 0; i < cars.length; i++) {
         for (let j = i + 1; j < cars.length; j++) {
-          physicsEngine.checkCarCollision(cars[i], cars[j]);
+          const collided = physicsEngine.checkCarCollision(cars[i], cars[j]);
+          if (collided && raceDirectorInstance) {
+            raceDirectorInstance.reportCollision(cars[i].id);
+            raceDirectorInstance.reportCollision(cars[j].id);
+          }
         }
       }
 
       cars.forEach(car => {
-        physicsEngine.checkTrackBoundary(car, track);
+        const offTrack = physicsEngine.checkTrackBoundary(car, track);
+        if (offTrack && raceDirectorInstance) {
+          raceDirectorInstance.reportOffTrack(car.id);
+        }
       });
+
+      if (raceDirectorInstance) {
+        raceDirectorInstance.update(cars, deltaTime);
+        telemetryTickRef.current += deltaTime;
+        if (telemetryTickRef.current >= 1) {
+          telemetryTickRef.current = 0;
+          setTelemetrySnapshot(raceDirectorInstance.getTelemetrySnapshot());
+        }
+      }
 
       cameraController.update(cars, deltaTime);
 
@@ -149,6 +174,8 @@ const RaceSimulator = () => {
     window.addEventListener('keydown', handleKeyPress);
 
     return () => {
+      raceDirectorRef.current = null;
+      telemetryTickRef.current = 0;
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('keydown', handleKeyPress);
       
@@ -220,6 +247,7 @@ const RaceSimulator = () => {
           </div>
         </div>
       </div>
+      <TelemetryPanel data={telemetrySnapshot} />
       <div ref={mountRef} style={{ width: '100%', height: '100vh' }} />
     </>
   );
