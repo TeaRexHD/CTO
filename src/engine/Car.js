@@ -29,6 +29,17 @@ export class Car {
     this.targetPosition = null;
     this.waypointIndex = 0;
     this.laneOffset = 0;
+
+    this.penaltyState = { type: 'none' };
+    this.servingPenalty = false;
+    this.timePenalties = 0;
+    this.warnings = 0;
+    this.disqualified = false;
+    this.underInvestigation = false;
+    this.blueFlagActive = false;
+    this.lastOffTrackIncident = 0;
+    this.lapCount = 0;
+    this.isLapped = false;
   }
 
   createMesh() {
@@ -97,12 +108,27 @@ export class Car {
   }
 
   updateAI(waypoints, allCars) {
+    if (this.disqualified) {
+      this.controls = { throttle: 0, brake: 1, steering: 0 };
+      return;
+    }
+
+    if (this.servingPenalty && this.penaltyState && this.penaltyState.active) {
+      this.controls.steering = 0;
+      this.controls.throttle = 0.3;
+      this.controls.brake = 0;
+      return;
+    }
+
     const currentWaypoint = waypoints[this.waypointIndex];
     const nextWaypointIndex = (this.waypointIndex + 1) % waypoints.length;
 
     const distanceToWaypoint = this.mesh.position.distanceTo(currentWaypoint);
     if (distanceToWaypoint < 15) {
       this.waypointIndex = nextWaypointIndex;
+      if (this.waypointIndex === 0) {
+        this.lapCount++;
+      }
     }
 
     const targetPos = currentWaypoint.clone();
@@ -123,6 +149,15 @@ export class Car {
     const steeringDirection = cross.y > 0 ? 1 : -1;
 
     const obstacleAhead = this.detectObstacle(allCars);
+
+    if (this.blueFlagActive) {
+      this.controls.steering = steeringDirection * Math.min(angle * 2, 1);
+      this.controls.throttle = 0.5;
+      this.controls.brake = 0;
+      this.laneOffset += 2;
+      this.laneOffset = Math.max(-5, Math.min(5, this.laneOffset));
+      return;
+    }
 
     if (obstacleAhead) {
       this.controls.steering = steeringDirection * Math.min(angle * 3, 1);

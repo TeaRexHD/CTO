@@ -4,9 +4,24 @@ export class PhysicsEngine {
   constructor() {
     this.gravity = -9.81;
     this.airDensity = 1.225;
+    this.raceDirector = null;
   }
 
-  applyPhysics(car, deltaTime) {
+  setRaceDirector(raceDirector) {
+    this.raceDirector = raceDirector;
+  }
+
+  applyPhysics(car, deltaTime, raceDirector = null) {
+    if (raceDirector && raceDirector.isSessionPaused()) {
+      return;
+    }
+
+    if (car.disqualified) {
+      car.velocity.set(0, 0, 0);
+      car.controls = { throttle: 0, brake: 1, steering: 0 };
+      return;
+    }
+
     const dt = Math.min(deltaTime, 0.033);
 
     const throttle = car.controls.throttle;
@@ -15,9 +30,20 @@ export class PhysicsEngine {
 
     const dragCoefficient = 0.3;
     const rollingResistance = 30;
-    const maxSpeed = car.maxSpeed;
+    let maxSpeed = car.maxSpeed;
     const acceleration = car.acceleration;
     const turnSpeed = car.turnSpeed;
+
+    if (raceDirector) {
+      const safetyCarSpeed = raceDirector.getSafetyCarSpeed();
+      if (safetyCarSpeed !== null) {
+        maxSpeed = Math.min(maxSpeed, safetyCarSpeed);
+      }
+    }
+
+    if (car.servingPenalty && car.penaltyState && car.penaltyState.pitLaneSpeed) {
+      maxSpeed = Math.min(maxSpeed, car.penaltyState.pitLaneSpeed);
+    }
 
     let force = 0;
     if (throttle > 0) {
@@ -59,6 +85,10 @@ export class PhysicsEngine {
   }
 
   checkCarCollision(car1, car2) {
+    if (car1.disqualified || car2.disqualified) {
+      return false;
+    }
+
     const distance = car1.mesh.position.distanceTo(car2.mesh.position);
     const minDistance = (car1.size.x + car2.size.x) / 2;
 
