@@ -5,6 +5,7 @@ import { Car } from '../engine/Car';
 import { PhysicsEngine } from '../engine/PhysicsEngine';
 import { CameraController } from '../engine/CameraController';
 import { getRandomAIProfile, CAR_COLORS } from '../engine/AIProfiles';
+import { RaceDirector } from '../engine/RaceDirector';
 
 const RaceSimulator = () => {
   const mountRef = useRef(null);
@@ -77,6 +78,11 @@ const RaceSimulator = () => {
     const cameraController = new CameraController(camera);
     cameraController.setTargetCar(cars[0]);
 
+    const raceDirector = new RaceDirector();
+    cars.forEach(car => {
+      raceDirector.initializeCar(car.id);
+    });
+
     let lastTime = performance.now();
     let frameCount = 0;
     let fpsTime = 0;
@@ -109,13 +115,21 @@ const RaceSimulator = () => {
 
       for (let i = 0; i < cars.length; i++) {
         for (let j = i + 1; j < cars.length; j++) {
-          physicsEngine.checkCarCollision(cars[i], cars[j]);
+          const collided = physicsEngine.checkCarCollision(cars[i], cars[j]);
+          raceDirector.checkCollisionIncident(cars[i], cars[j], collided);
         }
       }
 
       cars.forEach(car => {
         physicsEngine.checkTrackBoundary(car, track);
+        raceDirector.checkTrackLimitViolation(car, track);
       });
+
+      cars.forEach(car => {
+        raceDirector.updateTelemetry(car, deltaTime, cars, waypoints);
+      });
+
+      raceDirector.update(deltaTime);
 
       cameraController.update(cars, deltaTime);
 
@@ -151,6 +165,8 @@ const RaceSimulator = () => {
     return () => {
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('keydown', handleKeyPress);
+      
+      raceDirector.destroy();
       
       if (mount && renderer.domElement) {
         mount.removeChild(renderer.domElement);
