@@ -5,13 +5,18 @@ import { Car } from '../engine/Car';
 import { PhysicsEngine } from '../engine/PhysicsEngine';
 import { CameraController } from '../engine/CameraController';
 import { getRandomAIProfile, CAR_COLORS } from '../engine/AIProfiles';
+import { RaceDirector } from '../engine/RaceDirector';
 
 const RaceSimulator = () => {
   const mountRef = useRef(null);
+  const raceDirectorRef = useRef(null);
   const [stats, setStats] = useState({
     fps: 0,
     carCount: 20,
-    cameraMode: 'topdown'
+    cameraMode: 'topdown',
+    safetyCarActive: false,
+    vscActive: false,
+    sessionPaused: false
   });
 
   useEffect(() => {
@@ -77,10 +82,16 @@ const RaceSimulator = () => {
     const cameraController = new CameraController(camera);
     cameraController.setTargetCar(cars[0]);
 
+    if (!raceDirectorRef.current) {
+      raceDirectorRef.current = new RaceDirector();
+    }
+    const raceDirector = raceDirectorRef.current;
+
     let lastTime = performance.now();
     let frameCount = 0;
     let fpsTime = 0;
     let currentFPS = 60;
+    let updateCounter = 0;
 
     const animate = () => {
       const currentTime = performance.now();
@@ -96,25 +107,73 @@ const RaceSimulator = () => {
 
         setStats(prevStats => ({
           ...prevStats,
-          fps: currentFPS
+          fps: currentFPS,
+          safetyCarActive: raceDirector.isSafetyCarActive(),
+          vscActive: raceDirector.isVirtualSafetyCarActive(),
+          sessionPaused: raceDirector.isSessionPaused()
         }));
+      }
+
+      raceDirector.update();
+
+      updateCounter++;
+      if (updateCounter % 60 === 0) {
+        raceDirector.processPenalties(cars);
       }
 
       const waypoints = track.getWaypoints();
 
       cars.forEach(car => {
+        raceDirector.updateCarPenalties(car);
         car.update(waypoints, cars);
-        physicsEngine.applyPhysics(car, deltaTime);
+        physicsEngine.applyPhysics(car, deltaTime, raceDirector);
+      });
+
+      cars.forEach(car => {
+        if (!car.disqualified && !car.isLapped) {
+          const lapLeader = cars.reduce((leader, c) => 
+            c.lapCount > leader.lapCount ? c : leader
+          , cars[0]);
+          
+          if (lapLeader.lapCount > car.lapCount + 1) {
+            car.isLapped = true;
+          }
+        }
+      });
+
+      cars.forEach(car => {
+        if (car.blueFlagActive) {
+          car.blueFlagActive = false;
+        }
+      });
+
+      cars.forEach((car, index) => {
+        if (car.isLapped) {
+          for (let i = 0; i < cars.length; i++) {
+            if (i !== index && !cars[i].isLapped && !cars[i].disqualified) {
+              const distance = car.mesh.position.distanceTo(cars[i].mesh.position);
+              if (distance < 30) {
+                car.blueFlagActive = true;
+                if (Math.random() < 0.01) {
+                  raceDirector.issueBlueFlag(car.id, cars[i].id);
+                }
+                break;
+              }
+            }
+          }
+        }
       });
 
       for (let i = 0; i < cars.length; i++) {
         for (let j = i + 1; j < cars.length; j++) {
-          physicsEngine.checkCarCollision(cars[i], cars[j]);
+          const collisionOccurred = physicsEngine.checkCarCollision(cars[i], cars[j]);
+          raceDirector.checkCollision(cars[i], cars[j], collisionOccurred);
         }
       }
 
       cars.forEach(car => {
-        physicsEngine.checkTrackBoundary(car, track);
+        const offTrack = physicsEngine.checkTrackBoundary(car, track);
+        raceDirector.checkTrackBoundary(car, offTrack);
       });
 
       cameraController.update(cars, deltaTime);
@@ -142,6 +201,33 @@ const RaceSimulator = () => {
         const currentIndex = cars.findIndex(car => car === cameraController.targetCar);
         const nextIndex = (currentIndex + 1) % cars.length;
         cameraController.setTargetCar(cars[nextIndex]);
+      } else if (e.key === 's' || e.key === 'S') {
+        if (raceDirector.isSafetyCarActive()) {
+          raceDirector.withdrawSafetyCar();
+        } else {
+          raceDirector.deploySafetyCar(3);
+        }
+      } else if (e.key === 'v' || e.key === 'V') {
+        if (raceDirector.isVirtualSafetyCarActive()) {
+          raceDirector.withdrawSafetyCar();
+        } else {
+          raceDirector.deployVirtualSafetyCar();
+        }
+      } else if (e.key === 'p' || e.key === 'P') {
+        if (raceDirector.isSessionPaused()) {
+          raceDirector.resumeSession();
+        } else {
+          raceDirector.pauseSession();
+        }
+      } else if (e.key === 'd' || e.key === 'D') {
+        const randomCar = cars[Math.floor(Math.random() * cars.length)];
+        raceDirector.applyPenalty(randomCar.id, 'drive-through');
+      } else if (e.key === 't' || e.key === 'T') {
+        const randomCar = cars[Math.floor(Math.random() * cars.length)];
+        raceDirector.applyPenalty(randomCar.id, 'time-penalty', 5);
+      } else if (e.key === 'q' || e.key === 'Q') {
+        const randomCar = cars[Math.floor(Math.random() * cars.length)];
+        raceDirector.applyPenalty(randomCar.id, 'disqualification');
       }
     };
 
@@ -215,8 +301,19 @@ const RaceSimulator = () => {
           <div>FPS: {stats.fps}</div>
           <div>Cars: {stats.carCount}</div>
           <div>Camera: {stats.cameraMode}</div>
+          {stats.safetyCarActive && (
+            <div style={{ color: '#ff0', fontWeight: 'bold' }}>🚨 SAFETY CAR</div>
+          )}
+          {stats.vscActive && (
+            <div style={{ color: '#ff0', fontWeight: 'bold' }}>⚠️ VSC</div>
+          )}
+          {stats.sessionPaused && (
+            <div style={{ color: '#f00', fontWeight: 'bold' }}>⏸ PAUSED</div>
+          )}
           <div style={{ marginTop: '10px', fontSize: '11px' }}>
-            Press C to cycle through cars in chase mode
+            Press C to cycle cars | S: Safety Car<br/>
+            V: VSC | P: Pause | D: Drive-through<br/>
+            T: Time penalty | Q: Disqualify
           </div>
         </div>
       </div>
