@@ -5,14 +5,27 @@ import { Car } from '../engine/Car';
 import { PhysicsEngine } from '../engine/PhysicsEngine';
 import { CameraController } from '../engine/CameraController';
 import { getRandomAIProfile, CAR_COLORS } from '../engine/AIProfiles';
+import FIAControlPanel from './FIAControlPanel';
+import { RaceDirector } from '../engine/RaceDirector';
 
 const RaceSimulator = () => {
   const mountRef = useRef(null);
+  const raceDirectorRef = useRef(null);
+  if (!raceDirectorRef.current) {
+    raceDirectorRef.current = new RaceDirector();
+  }
+
   const [stats, setStats] = useState({
     fps: 0,
     carCount: 20,
     cameraMode: 'topdown'
   });
+  const [directorState, setDirectorState] = useState(raceDirectorRef.current.getState());
+
+  useEffect(() => {
+    const unsubscribe = raceDirectorRef.current.subscribe(setDirectorState);
+    return () => unsubscribe();
+  }, []);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -193,11 +206,13 @@ const RaceSimulator = () => {
     window.dispatchEvent(event);
   };
 
+  const eventLog = directorState.eventLog || [];
+
   return (
     <>
       <div className="controls">
         <h3>F1 Race Simulator</h3>
-        <div>
+        <div className="camera-buttons">
           <button 
             onClick={() => handleCameraChange('topdown')}
             className={stats.cameraMode === 'topdown' ? 'active' : ''}
@@ -218,6 +233,22 @@ const RaceSimulator = () => {
           <div style={{ marginTop: '10px', fontSize: '11px' }}>
             Press C to cycle through cars in chase mode
           </div>
+        </div>
+        <FIAControlPanel directorState={directorState} raceDirector={raceDirectorRef.current} />
+        <div className="event-log">
+          <div className="group-title">Event Log</div>
+          <ul>
+            {eventLog.length === 0 ? (
+              <li className="muted">No race control actions yet</li>
+            ) : (
+              eventLog.slice(0, 8).map(entry => (
+                <li key={entry.id}>
+                  <span className="event-time">{entry.timestamp}</span>
+                  <span className="event-message">{entry.message}</span>
+                </li>
+              ))
+            )}
+          </ul>
         </div>
       </div>
       <div ref={mountRef} style={{ width: '100%', height: '100vh' }} />
