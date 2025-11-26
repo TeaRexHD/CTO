@@ -6,6 +6,10 @@ import { PhysicsEngine } from '../engine/PhysicsEngine';
 import { CameraController } from '../engine/CameraController';
 import { getRandomAIProfile, CAR_COLORS } from '../engine/AIProfiles';
 import { RaceDirector } from '../engine/RaceDirector';
+import useRaceTelemetry from '../hooks/useRaceTelemetry';
+import TelemetryPanel from './TelemetryPanel';
+import SessionHeader from './SessionHeader';
+import EventTicker from './EventTicker';
 
 const RaceSimulator = () => {
   const mountRef = useRef(null);
@@ -14,6 +18,8 @@ const RaceSimulator = () => {
     carCount: 20,
     cameraMode: 'topdown'
   });
+  const [director, setDirector] = useState(null);
+  const telemetryHud = useRaceTelemetry(director);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -78,9 +84,10 @@ const RaceSimulator = () => {
     const cameraController = new CameraController(camera);
     cameraController.setTargetCar(cars[0]);
 
-    const raceDirector = new RaceDirector();
+    const directorInstance = new RaceDirector();
+    setDirector(directorInstance);
     cars.forEach(car => {
-      raceDirector.initializeCar(car.id);
+      directorInstance.initializeCar(car.id);
     });
 
     let lastTime = performance.now();
@@ -116,20 +123,20 @@ const RaceSimulator = () => {
       for (let i = 0; i < cars.length; i++) {
         for (let j = i + 1; j < cars.length; j++) {
           const collided = physicsEngine.checkCarCollision(cars[i], cars[j]);
-          raceDirector.checkCollisionIncident(cars[i], cars[j], collided);
+          directorInstance.checkCollisionIncident(cars[i], cars[j], collided);
         }
       }
 
       cars.forEach(car => {
         physicsEngine.checkTrackBoundary(car, track);
-        raceDirector.checkTrackLimitViolation(car, track);
+        directorInstance.checkTrackLimitViolation(car, track);
       });
 
       cars.forEach(car => {
-        raceDirector.updateTelemetry(car, deltaTime, cars, waypoints);
+        directorInstance.updateTelemetry(car, deltaTime, cars, waypoints);
       });
 
-      raceDirector.update(deltaTime);
+      directorInstance.update(deltaTime);
 
       cameraController.update(cars, deltaTime);
 
@@ -166,7 +173,8 @@ const RaceSimulator = () => {
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('keydown', handleKeyPress);
       
-      raceDirector.destroy();
+      setDirector(null);
+      directorInstance.destroy();
       
       if (mount && renderer.domElement) {
         mount.removeChild(renderer.domElement);
@@ -234,6 +242,13 @@ const RaceSimulator = () => {
           <div style={{ marginTop: '10px', fontSize: '11px' }}>
             Press C to cycle through cars in chase mode
           </div>
+        </div>
+      </div>
+      <div className="hud-overlay">
+        <SessionHeader session={telemetryHud.session} raceDirector={director} />
+        <div className="hud-panels">
+          <TelemetryPanel leaderboard={telemetryHud.leaderboard} />
+          <EventTicker entries={telemetryHud.ticker} />
         </div>
       </div>
       <div ref={mountRef} style={{ width: '100%', height: '100vh' }} />
