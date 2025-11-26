@@ -6,6 +6,7 @@ import { PhysicsEngine } from '../engine/PhysicsEngine';
 import { CameraController } from '../engine/CameraController';
 import { getRandomAIProfile, CAR_COLORS } from '../engine/AIProfiles';
 import { RaceDirector } from '../engine/RaceDirector';
+import TeamRadioFeed from './TeamRadioFeed';
 
 const RaceSimulator = () => {
   const mountRef = useRef(null);
@@ -14,6 +15,7 @@ const RaceSimulator = () => {
     carCount: 20,
     cameraMode: 'topdown'
   });
+  const [raceDirectorInstance, setRaceDirectorInstance] = useState(null);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -79,6 +81,7 @@ const RaceSimulator = () => {
     cameraController.setTargetCar(cars[0]);
 
     const raceDirector = new RaceDirector();
+    setRaceDirectorInstance(raceDirector);
     cars.forEach(car => {
       raceDirector.initializeCar(car.id);
     });
@@ -236,6 +239,7 @@ const RaceSimulator = () => {
           </div>
         </div>
       </div>
+      <TeamRadioFeed raceDirector={raceDirectorInstance} />
       <div ref={mountRef} style={{ width: '100%', height: '100vh' }} />
     </>
   );

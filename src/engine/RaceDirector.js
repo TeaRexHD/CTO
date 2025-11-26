@@ -1,3 +1,5 @@
+import { TeamRadioManager } from './TeamRadio';
+
 export class RaceDirector {
   constructor() {
     this.raceMeta = {
@@ -19,6 +21,9 @@ export class RaceDirector {
     this.lastIncidentTime = 0;
     this.incidentCooldown = 2;
     this.incidentChance = 0.002;
+
+    this.safetyCarTimer = null;
+    this.teamRadioManager = new TeamRadioManager(this);
   }
 
   initializeCar(carId) {
@@ -113,6 +118,11 @@ export class RaceDirector {
       const telemetry = this.carTelemetry.get(car.id);
       if (telemetry) {
         telemetry.trackLimitViolations++;
+        if (telemetry.trackLimitViolations % 3 === 0) {
+          this.applyPenalty(car.id, 'track-limits', 'Warning', {
+            violations: telemetry.trackLimitViolations
+          });
+        }
       }
 
       if (Math.random() > 0.7) {
@@ -129,6 +139,12 @@ export class RaceDirector {
       if (rand > 0.6) {
         this.createIncident('collision', car1, 'High', { otherCarId: car2.id });
         this.createIncident('collision', car2, 'High', { otherCarId: car1.id });
+
+        if (Math.random() > 0.5) {
+          this.fileProtest(car1.id, car2.id, 'Car ahead forced us off.');
+        } else {
+          this.fileProtest(car2.id, car1.id, 'Requesting review of that contact.');
+        }
       }
     }
   }
@@ -196,7 +212,77 @@ export class RaceDirector {
 
     this.emit('incident', incident);
 
+    if (severity === 'High') {
+      this.triggerSafetyCar(`Responding to ${type} near ${location}`);
+    }
+
     return incident;
+  }
+
+  applyPenalty(carId, penaltyType = 'generic', severity = 'Minor', metadata = {}) {
+    const telemetry = this.carTelemetry.get(carId);
+    if (!telemetry) {
+      return null;
+    }
+
+    const penalty = {
+      id: `${penaltyType}-${carId}-${Date.now()}`,
+      carId,
+      type: penaltyType,
+      severity,
+      timestamp: this.raceMeta.totalRaceTime,
+      metadata
+    };
+
+    telemetry.penalties.push(penalty);
+    this.emit('penalty', penalty);
+    return penalty;
+  }
+
+  fileProtest(carId, targetCarId, reason = '') {
+    if (carId === undefined || carId === null) {
+      return null;
+    }
+
+    const protest = {
+      id: `protest-${carId}-${Date.now()}-${Math.random()}`,
+      carId,
+      targetCarId,
+      reason,
+      timestamp: this.raceMeta.totalRaceTime
+    };
+
+    this.emit('protest', protest);
+    return protest;
+  }
+
+  setSafetyCarState(active, reason = '') {
+    if (this.raceMeta.safetyCarActive === active) {
+      return;
+    }
+
+    this.raceMeta.safetyCarActive = active;
+    this.emit('safetyCar', {
+      active,
+      reason,
+      timestamp: this.raceMeta.totalRaceTime
+    });
+  }
+
+  triggerSafetyCar(reason = '') {
+    this.setSafetyCarState(true, reason);
+    this.clearSafetyCarTimer();
+    this.safetyCarTimer = setTimeout(() => {
+      this.setSafetyCarState(false, 'Track clear, racing resumes');
+      this.safetyCarTimer = null;
+    }, 6000);
+  }
+
+  clearSafetyCarTimer() {
+    if (this.safetyCarTimer) {
+      clearTimeout(this.safetyCarTimer);
+      this.safetyCarTimer = null;
+    }
   }
 
   resolveIncident(incidentId) {
@@ -242,6 +328,9 @@ export class RaceDirector {
 
     return () => {
       const callbacks = this.listeners.get(event);
+      if (!callbacks) {
+        return;
+      }
       const index = callbacks.indexOf(callback);
       if (index > -1) {
         callbacks.splice(index, 1);
@@ -271,6 +360,12 @@ export class RaceDirector {
     this.lapStartTimes.clear();
     this.incidentThrottleTime = 0;
     this.lastIncidentTime = 0;
+    this.clearSafetyCarTimer();
+
+    if (this.teamRadioManager) {
+      this.teamRadioManager.destroy();
+      this.teamRadioManager = new TeamRadioManager(this);
+    }
   }
 
   destroy() {
@@ -278,5 +373,10 @@ export class RaceDirector {
     this.carTelemetry.clear();
     this.lastWaypointIndices.clear();
     this.lapStartTimes.clear();
+    this.clearSafetyCarTimer();
+    if (this.teamRadioManager) {
+      this.teamRadioManager.destroy();
+      this.teamRadioManager = null;
+    }
   }
 }
