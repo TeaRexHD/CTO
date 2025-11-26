@@ -1,15 +1,20 @@
 export class RaceDirector {
   constructor() {
     this.raceMeta = {
-      lapCount: 0,
+      lapCount: 1,
+      totalLaps: 58,
       currentLapTime: 0,
-      weather: 'clear',
+      weather: 'Clear',
       safetyCarActive: false,
-      totalRaceTime: 0
+      totalRaceTime: 0,
+      flagState: 'GREEN',
+      sessionPhase: 'Race',
+      safetyCarMode: 'OFF'
     };
 
     this.carTelemetry = new Map();
     this.incidents = [];
+    this.decisions = [];
     this.listeners = new Map();
     
     this.lastWaypointIndices = new Map();
@@ -19,6 +24,13 @@ export class RaceDirector {
     this.lastIncidentTime = 0;
     this.incidentCooldown = 2;
     this.incidentChance = 0.002;
+
+    this.flagResetTimer = 0;
+    this.weatherChangeTimer = 0;
+    this.weatherChangeInterval = 40;
+    this.weatherOptions = ['Clear', 'Cloudy', 'Overcast', 'Light Rain'];
+
+    this.emitSessionState();
   }
 
   initializeCar(carId) {
@@ -53,6 +65,7 @@ export class RaceDirector {
     telemetry.speed = car.getSpeed();
     telemetry.currentSectorTime += deltaTime;
     telemetry.tyreHealth = Math.max(0, telemetry.tyreHealth - deltaTime * 0.5);
+    telemetry.lastWaypointIndex = car.waypointIndex;
 
     this.detectLapCompletion(car, telemetry, waypoints);
     this.updateGapToLeader(telemetry, allCars);
@@ -76,6 +89,8 @@ export class RaceDirector {
       telemetry.currentSectorTime = 0;
       telemetry.sectorIndex = 0;
 
+      this.updateRaceLapCount(telemetry.lap + 1);
+
       this.emit('lapCompleted', {
         carId: car.id,
         lap: telemetry.lap,
@@ -84,6 +99,15 @@ export class RaceDirector {
     }
 
     this.lastWaypointIndices.set(car.id, waypointIndex);
+  }
+
+  updateRaceLapCount(lap) {
+    const clampedLap = Math.max(1, Math.min(lap, this.raceMeta.totalLaps));
+    if (clampedLap > this.raceMeta.lapCount) {
+      this.raceMeta.lapCount = clampedLap;
+      this.raceMeta.currentLapTime = 0;
+      this.emitSessionState();
+    }
   }
 
   updateGapToLeader(telemetry, allCars) {
@@ -137,6 +161,18 @@ export class RaceDirector {
     this.incidentThrottleTime += deltaTime;
     this.raceMeta.totalRaceTime += deltaTime;
     this.raceMeta.currentLapTime += deltaTime;
+    this.weatherChangeTimer += deltaTime;
+
+    if (this.flagResetTimer > 0 && this.raceMeta.safetyCarMode === 'OFF') {
+      this.flagResetTimer -= deltaTime;
+      if (this.flagResetTimer <= 0 && this.raceMeta.flagState !== 'GREEN') {
+        this.setFlagState('GREEN');
+      }
+    }
+
+    if (this.weatherChangeTimer >= this.weatherChangeInterval) {
+      this.randomizeWeather();
+    }
 
     const timeSinceLastIncident = this.incidentThrottleTime - this.lastIncidentTime;
     if (timeSinceLastIncident > this.incidentCooldown) {
@@ -144,6 +180,58 @@ export class RaceDirector {
         this.generateRandomIncident();
         this.lastIncidentTime = this.incidentThrottleTime;
       }
+    }
+  }
+
+  randomizeWeather() {
+    const options = this.weatherOptions.filter(option => option !== this.raceMeta.weather);
+    const nextWeather = options[Math.floor(Math.random() * options.length)];
+    this.weatherChangeTimer = 0;
+    this.setWeather(nextWeather);
+  }
+
+  setWeather(weather) {
+    if (this.raceMeta.weather === weather) return;
+    this.raceMeta.weather = weather;
+    this.emitSessionState();
+  }
+
+  setFlagState(flag, options = {}) {
+    if (this.raceMeta.flagState === flag) {
+      if (options.holdFor) {
+        this.flagResetTimer = options.holdFor;
+      }
+      return;
+    }
+
+    this.raceMeta.flagState = flag;
+
+    if (options.holdFor) {
+      this.flagResetTimer = options.holdFor;
+    } else if (flag === 'GREEN') {
+      this.flagResetTimer = 0;
+    }
+
+    this.emitSessionState();
+  }
+
+  setSafetyCarMode(mode) {
+    if (this.raceMeta.safetyCarMode === mode) return;
+
+    this.raceMeta.safetyCarMode = mode;
+    this.raceMeta.safetyCarActive = mode !== 'OFF';
+    this.raceMeta.sessionPhase = mode === 'OFF'
+      ? 'Race'
+      : mode === 'VIRTUAL'
+        ? 'VSC'
+        : 'Safety Car';
+
+    if (mode !== 'OFF') {
+      this.setFlagState('YELLOW', { holdFor: this.flagResetTimer || 12 });
+    } else if (this.raceMeta.flagState !== 'GREEN' && this.flagResetTimer <= 0) {
+      this.setFlagState('GREEN');
+    } else {
+      this.emitSessionState();
     }
   }
 
@@ -194,6 +282,10 @@ export class RaceDirector {
       this.incidents.shift();
     }
 
+    if (severity === 'High') {
+      this.setFlagState('YELLOW', { holdFor: 8 });
+    }
+
     this.emit('incident', incident);
 
     return incident;
@@ -207,8 +299,67 @@ export class RaceDirector {
     }
   }
 
+  issueDecision(type, metadata = {}) {
+    const decision = {
+      id: `decision-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      type,
+      timestamp: this.raceMeta.totalRaceTime,
+      metadata
+    };
+
+    this.decisions.push(decision);
+    if (this.decisions.length > 50) {
+      this.decisions.shift();
+    }
+
+    this.emit('decision', decision);
+    return decision;
+  }
+
+  applyRaceControlDecision(decisionType, metadata = {}) {
+    const normalized = decisionType.toUpperCase();
+
+    if (normalized === 'SAFETY_CAR_DEPLOY') {
+      this.setSafetyCarMode('DEPLOYED');
+    } else if (normalized === 'SAFETY_CAR_RETURN') {
+      this.setSafetyCarMode('OFF');
+    } else if (normalized === 'VIRTUAL_SC') {
+      this.setSafetyCarMode('VIRTUAL');
+    } else if (normalized === 'YELLOW_FLAG') {
+      this.setSafetyCarMode('OFF');
+      this.setFlagState('YELLOW', { holdFor: metadata.holdFor || 6 });
+    } else if (normalized === 'GREEN_FLAG') {
+      this.setSafetyCarMode('OFF');
+      this.setFlagState('GREEN');
+    }
+
+    return this.issueDecision(decisionType, {
+      ...metadata,
+      flagState: this.raceMeta.flagState,
+      safetyCarMode: this.raceMeta.safetyCarMode
+    });
+  }
+
   getRaceMeta() {
     return { ...this.raceMeta };
+  }
+
+  getSessionState() {
+    return {
+      lap: this.raceMeta.lapCount,
+      totalLaps: this.raceMeta.totalLaps,
+      weather: this.raceMeta.weather,
+      flagState: this.raceMeta.flagState,
+      safetyCarMode: this.raceMeta.safetyCarMode,
+      sessionPhase: this.raceMeta.sessionPhase,
+      safetyCarActive: this.raceMeta.safetyCarActive,
+      currentLapTime: this.raceMeta.currentLapTime,
+      totalRaceTime: this.raceMeta.totalRaceTime
+    };
+  }
+
+  emitSessionState() {
+    this.emit('session', this.getSessionState());
   }
 
   getCarTelemetry(carId) {
@@ -234,6 +385,12 @@ export class RaceDirector {
       .reverse();
   }
 
+  getRecentDecisions(limit = 10) {
+    return this.decisions
+      .slice(-limit)
+      .reverse();
+  }
+
   subscribe(event, callback) {
     if (!this.listeners.has(event)) {
       this.listeners.set(event, []);
@@ -242,6 +399,7 @@ export class RaceDirector {
 
     return () => {
       const callbacks = this.listeners.get(event);
+      if (!callbacks) return;
       const index = callbacks.indexOf(callback);
       if (index > -1) {
         callbacks.splice(index, 1);
@@ -259,23 +417,33 @@ export class RaceDirector {
 
   reset() {
     this.raceMeta = {
-      lapCount: 0,
+      lapCount: 1,
+      totalLaps: 58,
       currentLapTime: 0,
-      weather: 'clear',
+      weather: 'Clear',
       safetyCarActive: false,
-      totalRaceTime: 0
+      totalRaceTime: 0,
+      flagState: 'GREEN',
+      sessionPhase: 'Race',
+      safetyCarMode: 'OFF'
     };
     this.carTelemetry.clear();
     this.incidents = [];
+    this.decisions = [];
     this.lastWaypointIndices.clear();
     this.lapStartTimes.clear();
     this.incidentThrottleTime = 0;
     this.lastIncidentTime = 0;
+    this.flagResetTimer = 0;
+    this.weatherChangeTimer = 0;
+    this.emitSessionState();
   }
 
   destroy() {
     this.listeners.clear();
     this.carTelemetry.clear();
+    this.incidents = [];
+    this.decisions = [];
     this.lastWaypointIndices.clear();
     this.lapStartTimes.clear();
   }
