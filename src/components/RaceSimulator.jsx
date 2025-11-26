@@ -6,6 +6,7 @@ import { PhysicsEngine } from '../engine/PhysicsEngine';
 import { CameraController } from '../engine/CameraController';
 import { getRandomAIProfile, CAR_COLORS } from '../engine/AIProfiles';
 import { useRaceControl } from '../context/RaceControlContext';
+import TeamRadioFeed from './TeamRadioFeed';
 
 const RaceSimulator = () => {
   const mountRef = useRef(null);
@@ -234,6 +235,7 @@ const RaceSimulator = () => {
           </div>
         </div>
       </div>
+      {raceDirector && <TeamRadioFeed raceDirector={raceDirector} />}
       <div ref={mountRef} style={{ width: '100%', height: '100vh' }} />
     </>
   );

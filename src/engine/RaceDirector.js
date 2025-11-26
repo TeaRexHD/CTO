@@ -1,3 +1,5 @@
+import { TeamRadioManager } from './TeamRadio';
+
 export class RaceDirector {
   constructor() {
     this.raceMeta = {
@@ -16,14 +18,17 @@ export class RaceDirector {
     this.listeners = new Map();
     this.penaltyLog = [];
     this.protests = [];
-    
+
     this.lastWaypointIndices = new Map();
     this.lapStartTimes = new Map();
-    
+
     this.incidentThrottleTime = 0;
     this.lastIncidentTime = 0;
     this.incidentCooldown = 2;
     this.incidentChance = 0.002;
+
+    this.safetyCarTimer = null;
+    this.teamRadioManager = new TeamRadioManager(this);
   }
 
   initializeCar(carId) {
@@ -118,6 +123,11 @@ export class RaceDirector {
       const telemetry = this.carTelemetry.get(car.id);
       if (telemetry) {
         telemetry.trackLimitViolations++;
+        if (telemetry.trackLimitViolations % 3 === 0) {
+          this.applyPenalty(car.id, 'track-limits', 'Warning', {
+            violations: telemetry.trackLimitViolations
+          });
+        }
       }
 
       if (Math.random() > 0.7) {
@@ -134,6 +144,12 @@ export class RaceDirector {
       if (rand > 0.6) {
         this.createIncident('collision', car1, 'High', { otherCarId: car2.id });
         this.createIncident('collision', car2, 'High', { otherCarId: car1.id });
+
+        if (Math.random() > 0.5) {
+          this.fileProtest(car1.id, car2.id, 'Car forced us wide at the apex.');
+        } else {
+          this.fileProtest(car2.id, car1.id, 'Requesting review of that contact.');
+        }
       }
     }
   }
@@ -171,7 +187,7 @@ export class RaceDirector {
 
   createIncident(type, car = null, severity = 'Medium', metadata = {}) {
     const incidentId = `${type}-${this.incidentThrottleTime}-${Math.random()}`;
-    
+
     const incidentLocations = [
       'Turn 1', 'Turn 2', 'Turn 3', 'Turn 4', 'Turn 5',
       'Apex', 'Chicane', 'Main Straight', 'Hairpin', 'Sector 1'
@@ -201,7 +217,177 @@ export class RaceDirector {
 
     this.emit('incident', incident);
 
+    if (severity === 'High') {
+      this.triggerSafetyCar(`Responding to ${type} near ${location}`);
+    }
+
     return incident;
+  }
+
+  setFlag(flagColor = 'green') {
+    if (!flagColor) {
+      return this.raceMeta.flagState;
+    }
+    const normalized = flagColor.toLowerCase();
+    if (this.raceMeta.flagState === normalized) {
+      return normalized;
+    }
+    this.raceMeta.flagState = normalized;
+    this.emit('flagChange', { flag: normalized });
+    return normalized;
+  }
+
+  setSafetyCarState(active, reason = '', mode = 'sc') {
+    const nextMode = active ? (mode || 'sc') : 'off';
+    if (this.raceMeta.safetyCarActive === active && this.raceMeta.safetyCarMode === nextMode) {
+      return;
+    }
+
+    this.raceMeta.safetyCarActive = active;
+    this.raceMeta.safetyCarMode = nextMode;
+
+    const payload = {
+      active,
+      mode: nextMode,
+      reason,
+      timestamp: this.raceMeta.totalRaceTime
+    };
+
+    this.emit('safetyCar', payload);
+    this.emit('safetyCarChange', payload);
+  }
+
+  deploySafetyCar(reason = 'Manual deployment') {
+    this.clearSafetyCarTimer();
+    this.setSafetyCarState(true, reason, 'sc');
+  }
+
+  deployVirtualSafetyCar(reason = 'Manual VSC deployment') {
+    this.clearSafetyCarTimer();
+    this.setSafetyCarState(true, reason, 'vsc');
+  }
+
+  releaseSafetyCar(reason = 'Race control release') {
+    this.clearSafetyCarTimer();
+    this.setSafetyCarState(false, reason, 'off');
+  }
+
+  triggerSafetyCar(reason = '') {
+    this.deploySafetyCar(reason);
+    this.clearSafetyCarTimer();
+    this.safetyCarTimer = setTimeout(() => {
+      this.releaseSafetyCar('Track clear, racing resumes');
+      this.safetyCarTimer = null;
+    }, 6000);
+  }
+
+  clearSafetyCarTimer() {
+    if (this.safetyCarTimer) {
+      clearTimeout(this.safetyCarTimer);
+      this.safetyCarTimer = null;
+    }
+  }
+
+  startSession() {
+    this.raceMeta.sessionState = 'running';
+    this.emit('sessionChange', { state: 'running' });
+  }
+
+  pauseSession() {
+    this.raceMeta.sessionState = 'paused';
+    this.emit('sessionChange', { state: 'paused' });
+  }
+
+  abortSession() {
+    this.raceMeta.sessionState = 'aborted';
+    this.emit('sessionChange', { state: 'aborted' });
+  }
+
+  applyPenalty(carId, penaltyType = 'warning', severity = 'Info', metadata = {}) {
+    if (!this.carTelemetry.has(carId)) {
+      return null;
+    }
+
+    const penalty = {
+      id: `penalty-${Date.now()}-${Math.random()}`,
+      carId,
+      type: penaltyType,
+      severity,
+      metadata,
+      timestamp: this.raceMeta.totalRaceTime
+    };
+
+    const telemetry = this.carTelemetry.get(carId);
+    telemetry.penalties = [...telemetry.penalties, penalty];
+
+    this.penaltyLog.push(penalty);
+    if (this.penaltyLog.length > 50) {
+      this.penaltyLog.shift();
+    }
+
+    this.emit('penaltyIssued', penalty);
+    this.emit('penalty', penalty);
+    return penalty;
+  }
+
+  issuePenalty(carId, penaltyType) {
+    return this.applyPenalty(carId, penaltyType, 'Manual', { issuedBy: 'race-control' });
+  }
+
+  getPenaltyLog() {
+    return [...this.penaltyLog];
+  }
+
+  fileProtest(arg1, arg2, arg3) {
+    let protestData = {};
+
+    if (typeof arg1 === 'object' && arg1 !== null) {
+      protestData = arg1;
+    } else if (typeof arg1 === 'number' || typeof arg1 === 'string') {
+      protestData = {
+        carId: Number(arg1),
+        targetCarId: Number(arg2),
+        reason: arg3
+      };
+    } else {
+      protestData = {
+        team: arg1,
+        issue: arg2
+      };
+    }
+
+    const team = protestData.team?.trim() || '';
+    const issue = protestData.issue?.trim() || '';
+    const reason = protestData.reason?.trim() || issue || '';
+    const carId = Number.isFinite(protestData.carId) ? Number(protestData.carId) : null;
+    const targetCarId = Number.isFinite(protestData.targetCarId) ? Number(protestData.targetCarId) : null;
+
+    if (!team && !issue && carId === null && !reason) {
+      return null;
+    }
+
+    const protest = {
+      id: `protest-${Date.now()}-${Math.random()}`,
+      carId,
+      targetCarId,
+      team: team || (carId !== null ? `Car ${carId + 1}` : ''),
+      issue: issue || reason || 'General protest',
+      reason: reason || issue || 'General protest',
+      timestamp: this.raceMeta.totalRaceTime
+    };
+
+    this.protests.push(protest);
+    if (this.protests.length > 50) {
+      this.protests.shift();
+    }
+
+    this.emit('protestFiled', protest);
+    this.emit('protest', protest);
+    return protest;
+  }
+
+  getProtests() {
+    return [...this.protests];
   }
 
   resolveIncident(incidentId) {
@@ -239,105 +425,6 @@ export class RaceDirector {
       .reverse();
   }
 
-  setFlag(flagColor = 'green') {
-    if (!flagColor) {
-      return this.raceMeta.flagState;
-    }
-    const normalized = flagColor.toLowerCase();
-    if (this.raceMeta.flagState === normalized) {
-      return normalized;
-    }
-    this.raceMeta.flagState = normalized;
-    this.emit('flagChange', { flag: normalized });
-    return normalized;
-  }
-
-  deploySafetyCar() {
-    this.raceMeta.safetyCarActive = true;
-    this.raceMeta.safetyCarMode = 'sc';
-    this.emit('safetyCarChange', { mode: 'sc' });
-  }
-
-  deployVirtualSafetyCar() {
-    this.raceMeta.safetyCarActive = true;
-    this.raceMeta.safetyCarMode = 'vsc';
-    this.emit('safetyCarChange', { mode: 'vsc' });
-  }
-
-  releaseSafetyCar() {
-    this.raceMeta.safetyCarActive = false;
-    this.raceMeta.safetyCarMode = 'off';
-    this.emit('safetyCarChange', { mode: 'off' });
-  }
-
-  startSession() {
-    this.raceMeta.sessionState = 'running';
-    this.emit('sessionChange', { state: 'running' });
-  }
-
-  pauseSession() {
-    this.raceMeta.sessionState = 'paused';
-    this.emit('sessionChange', { state: 'paused' });
-  }
-
-  abortSession() {
-    this.raceMeta.sessionState = 'aborted';
-    this.emit('sessionChange', { state: 'aborted' });
-  }
-
-  issuePenalty(carId, penaltyType) {
-    if (!this.carTelemetry.has(carId)) {
-      return null;
-    }
-
-    const penalty = {
-      id: `penalty-${Date.now()}-${Math.random()}`,
-      carId,
-      type: penaltyType,
-      timestamp: this.raceMeta.totalRaceTime
-    };
-
-    const telemetry = this.carTelemetry.get(carId);
-    telemetry.penalties = [...telemetry.penalties, penalty];
-
-    this.penaltyLog.push(penalty);
-    if (this.penaltyLog.length > 50) {
-      this.penaltyLog.shift();
-    }
-
-    this.emit('penaltyIssued', penalty);
-    return penalty;
-  }
-
-  getPenaltyLog() {
-    return [...this.penaltyLog];
-  }
-
-  fileProtest(team, issue) {
-    if (!team || !issue) {
-      return null;
-    }
-
-    const protest = {
-      id: `protest-${Date.now()}-${Math.random()}`,
-      team: team.trim(),
-      issue: issue.trim(),
-      timestamp: this.raceMeta.totalRaceTime
-    };
-
-    this.protests.push(protest);
-    if (this.protests.length > 50) {
-      this.protests.shift();
-    }
-
-    this.emit('protestFiled', protest);
-    return protest;
-  }
-
-  getProtests() {
-    return [...this.protests];
-  }
-
   subscribe(event, callback) {
     if (!this.listeners.has(event)) {
       this.listeners.set(event, []);
@@ -346,6 +433,9 @@ export class RaceDirector {
 
     return () => {
       const callbacks = this.listeners.get(event);
+      if (!callbacks) {
+        return;
+      }
       const index = callbacks.indexOf(callback);
       if (index > -1) {
         callbacks.splice(index, 1);
@@ -362,6 +452,7 @@ export class RaceDirector {
   }
 
   reset() {
+    this.clearSafetyCarTimer();
     this.raceMeta = {
       lapCount: 0,
       currentLapTime: 0,
@@ -383,6 +474,11 @@ export class RaceDirector {
   }
 
   destroy() {
+    this.clearSafetyCarTimer();
+    if (this.teamRadioManager) {
+      this.teamRadioManager.destroy();
+      this.teamRadioManager = null;
+    }
     this.listeners.clear();
     this.carTelemetry.clear();
     this.incidents = [];
