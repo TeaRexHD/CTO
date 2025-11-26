@@ -8,7 +8,8 @@ export class Car {
 
     this.size = { x: 4, y: 1.5, z: 2 };
     this.mass = 800;
-    this.maxSpeed = aiProfile.baseSpeed;
+    this.baseMaxSpeed = aiProfile.baseSpeed;
+    this.maxSpeed = this.baseMaxSpeed;
     this.acceleration = aiProfile.acceleration;
     this.brakeForce = 1500;
     this.turnSpeed = aiProfile.turnSpeed;
