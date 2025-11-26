@@ -10,6 +10,7 @@ import useRaceTelemetry from '../hooks/useRaceTelemetry';
 import TelemetryPanel from './TelemetryPanel';
 import SessionHeader from './SessionHeader';
 import EventTicker from './EventTicker';
+import TeamRadioFeed from './TeamRadioFeed';
 
 const RaceSimulator = () => {
   const mountRef = useRef(null);
@@ -249,6 +250,7 @@ const RaceSimulator = () => {
         <div className="hud-panels">
           <TelemetryPanel leaderboard={telemetryHud.leaderboard} />
           <EventTicker entries={telemetryHud.ticker} />
+          <TeamRadioFeed raceDirector={director} />
         </div>
       </div>
       <div ref={mountRef} style={{ width: '100%', height: '100vh' }} />

@@ -1,3 +1,5 @@
+import { TeamRadioManager } from './TeamRadio';
+
 export class RaceDirector {
   constructor() {
     this.raceMeta = {
@@ -16,10 +18,10 @@ export class RaceDirector {
     this.incidents = [];
     this.decisions = [];
     this.listeners = new Map();
-    
+
     this.lastWaypointIndices = new Map();
     this.lapStartTimes = new Map();
-    
+
     this.incidentThrottleTime = 0;
     this.lastIncidentTime = 0;
     this.incidentCooldown = 2;
@@ -29,6 +31,9 @@ export class RaceDirector {
     this.weatherChangeTimer = 0;
     this.weatherChangeInterval = 40;
     this.weatherOptions = ['Clear', 'Cloudy', 'Overcast', 'Light Rain'];
+
+    this.safetyCarTimer = null;
+    this.teamRadioManager = new TeamRadioManager(this);
 
     this.emitSessionState();
   }
@@ -137,6 +142,11 @@ export class RaceDirector {
       const telemetry = this.carTelemetry.get(car.id);
       if (telemetry) {
         telemetry.trackLimitViolations++;
+        if (telemetry.trackLimitViolations % 3 === 0) {
+          this.applyPenalty(car.id, 'track-limits', 'Warning', {
+            violations: telemetry.trackLimitViolations
+          });
+        }
       }
 
       if (Math.random() > 0.7) {
@@ -153,6 +163,12 @@ export class RaceDirector {
       if (rand > 0.6) {
         this.createIncident('collision', car1, 'High', { otherCarId: car2.id });
         this.createIncident('collision', car2, 'High', { otherCarId: car1.id });
+
+        if (Math.random() > 0.5) {
+          this.fileProtest(car1.id, car2.id, 'Car ahead forced us off.');
+        } else {
+          this.fileProtest(car2.id, car1.id, 'Requesting review of that contact.');
+        }
       }
     }
   }
@@ -215,24 +231,38 @@ export class RaceDirector {
     this.emitSessionState();
   }
 
-  setSafetyCarMode(mode) {
-    if (this.raceMeta.safetyCarMode === mode) return;
+  setSafetyCarMode(mode, reason = '') {
+    if (this.raceMeta.safetyCarMode === mode) {
+      if (reason) {
+        this.setSafetyCarState(this.raceMeta.safetyCarActive, reason);
+      }
+      return;
+    }
 
     this.raceMeta.safetyCarMode = mode;
-    this.raceMeta.safetyCarActive = mode !== 'OFF';
-    this.raceMeta.sessionPhase = mode === 'OFF'
-      ? 'Race'
-      : mode === 'VIRTUAL'
+    const active = mode !== 'OFF';
+    this.raceMeta.safetyCarActive = active;
+    this.raceMeta.sessionPhase = active
+      ? mode === 'VIRTUAL'
         ? 'VSC'
-        : 'Safety Car';
+        : 'Safety Car'
+      : 'Race';
 
-    if (mode !== 'OFF') {
+    const defaultReason = mode === 'OFF'
+      ? 'Safety car ending'
+      : mode === 'VIRTUAL'
+        ? 'Virtual safety car active'
+        : 'Safety car deployed';
+
+    this.setSafetyCarState(active, reason || defaultReason);
+
+    if (active) {
       this.setFlagState('YELLOW', { holdFor: this.flagResetTimer || 12 });
     } else if (this.raceMeta.flagState !== 'GREEN' && this.flagResetTimer <= 0) {
       this.setFlagState('GREEN');
-    } else {
-      this.emitSessionState();
     }
+
+    this.emitSessionState();
   }
 
   generateRandomIncident() {
@@ -254,7 +284,7 @@ export class RaceDirector {
 
   createIncident(type, car = null, severity = 'Medium', metadata = {}) {
     const incidentId = `${type}-${this.incidentThrottleTime}-${Math.random()}`;
-    
+
     const incidentLocations = [
       'Turn 1', 'Turn 2', 'Turn 3', 'Turn 4', 'Turn 5',
       'Apex', 'Chicane', 'Main Straight', 'Hairpin', 'Sector 1'
@@ -284,11 +314,78 @@ export class RaceDirector {
 
     if (severity === 'High') {
       this.setFlagState('YELLOW', { holdFor: 8 });
+      this.triggerSafetyCar(`Responding to ${type} near ${location}`);
     }
 
     this.emit('incident', incident);
 
     return incident;
+  }
+
+  applyPenalty(carId, penaltyType = 'generic', severity = 'Minor', metadata = {}) {
+    const telemetry = this.carTelemetry.get(carId);
+    if (!telemetry) {
+      return null;
+    }
+
+    const penalty = {
+      id: `${penaltyType}-${carId}-${Date.now()}`,
+      carId,
+      type: penaltyType,
+      severity,
+      timestamp: this.raceMeta.totalRaceTime,
+      metadata
+    };
+
+    telemetry.penalties.push(penalty);
+    this.emit('penalty', penalty);
+    return penalty;
+  }
+
+  fileProtest(carId, targetCarId, reason = '') {
+    if (carId === undefined || carId === null) {
+      return null;
+    }
+
+    const protest = {
+      id: `protest-${carId}-${Date.now()}-${Math.random()}`,
+      carId,
+      targetCarId,
+      reason,
+      timestamp: this.raceMeta.totalRaceTime
+    };
+
+    this.emit('protest', protest);
+    return protest;
+  }
+
+  setSafetyCarState(active, reason = '') {
+    if (this.raceMeta.safetyCarActive === active && !reason) {
+      return;
+    }
+
+    this.raceMeta.safetyCarActive = active;
+    this.emit('safetyCar', {
+      active,
+      reason,
+      timestamp: this.raceMeta.totalRaceTime
+    });
+  }
+
+  triggerSafetyCar(reason = '') {
+    this.setSafetyCarMode('DEPLOYED', reason || 'Safety car deployed');
+    this.clearSafetyCarTimer();
+    this.safetyCarTimer = setTimeout(() => {
+      this.setSafetyCarMode('OFF', 'Track clear, racing resumes');
+      this.safetyCarTimer = null;
+    }, 6000);
+  }
+
+  clearSafetyCarTimer() {
+    if (this.safetyCarTimer) {
+      clearTimeout(this.safetyCarTimer);
+      this.safetyCarTimer = null;
+    }
   }
 
   resolveIncident(incidentId) {
@@ -318,18 +415,19 @@ export class RaceDirector {
 
   applyRaceControlDecision(decisionType, metadata = {}) {
     const normalized = decisionType.toUpperCase();
+    const reason = metadata.message;
 
     if (normalized === 'SAFETY_CAR_DEPLOY') {
-      this.setSafetyCarMode('DEPLOYED');
+      this.setSafetyCarMode('DEPLOYED', reason || 'Safety car deployed by race control');
     } else if (normalized === 'SAFETY_CAR_RETURN') {
-      this.setSafetyCarMode('OFF');
+      this.setSafetyCarMode('OFF', reason || 'Safety car returning to pit lane');
     } else if (normalized === 'VIRTUAL_SC') {
-      this.setSafetyCarMode('VIRTUAL');
+      this.setSafetyCarMode('VIRTUAL', reason || 'Virtual safety car in effect');
     } else if (normalized === 'YELLOW_FLAG') {
-      this.setSafetyCarMode('OFF');
+      this.setSafetyCarMode('OFF', reason || 'Local yellow flag');
       this.setFlagState('YELLOW', { holdFor: metadata.holdFor || 6 });
     } else if (normalized === 'GREEN_FLAG') {
-      this.setSafetyCarMode('OFF');
+      this.setSafetyCarMode('OFF', reason || 'Green flag conditions');
       this.setFlagState('GREEN');
     }
 
@@ -436,6 +534,13 @@ export class RaceDirector {
     this.lastIncidentTime = 0;
     this.flagResetTimer = 0;
     this.weatherChangeTimer = 0;
+    this.clearSafetyCarTimer();
+
+    if (this.teamRadioManager) {
+      this.teamRadioManager.destroy();
+      this.teamRadioManager = new TeamRadioManager(this);
+    }
+
     this.emitSessionState();
   }
 
@@ -446,5 +551,10 @@ export class RaceDirector {
     this.decisions = [];
     this.lastWaypointIndices.clear();
     this.lapStartTimes.clear();
+    this.clearSafetyCarTimer();
+    if (this.teamRadioManager) {
+      this.teamRadioManager.destroy();
+      this.teamRadioManager = null;
+    }
   }
 }
