@@ -129,7 +129,7 @@ const RaceSimulator = () => {
         raceDirector.updateTelemetry(car, deltaTime, cars, waypoints);
       });
 
-      raceDirector.update(deltaTime);
+      raceDirector.update(deltaTime, { cars });
 
       cameraController.update(cars, deltaTime);
 
