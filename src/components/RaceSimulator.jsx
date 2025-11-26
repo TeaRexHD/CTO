@@ -5,7 +5,7 @@ import { Car } from '../engine/Car';
 import { PhysicsEngine } from '../engine/PhysicsEngine';
 import { CameraController } from '../engine/CameraController';
 import { getRandomAIProfile, CAR_COLORS } from '../engine/AIProfiles';
-import { RaceDirector } from '../engine/RaceDirector';
+import { useRaceControl } from '../context/RaceControlContext';
 
 const RaceSimulator = () => {
   const mountRef = useRef(null);
@@ -14,10 +14,11 @@ const RaceSimulator = () => {
     carCount: 20,
     cameraMode: 'topdown'
   });
+  const { raceDirector } = useRaceControl();
 
   useEffect(() => {
     const mount = mountRef.current;
-    if (!mount) return;
+    if (!mount || !raceDirector) return;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x87ceeb);
@@ -78,7 +79,6 @@ const RaceSimulator = () => {
     const cameraController = new CameraController(camera);
     cameraController.setTargetCar(cars[0]);
 
-    const raceDirector = new RaceDirector();
     cars.forEach(car => {
       raceDirector.initializeCar(car.id);
     });
@@ -166,8 +166,6 @@ const RaceSimulator = () => {
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('keydown', handleKeyPress);
       
-      raceDirector.destroy();
-      
       if (mount && renderer.domElement) {
         mount.removeChild(renderer.domElement);
       }
@@ -202,7 +200,7 @@ const RaceSimulator = () => {
         });
       }
     };
-  }, []);
+  }, [raceDirector]);
 
   const handleCameraChange = (mode) => {
     const event = new KeyboardEvent('keydown', { key: mode === 'topdown' ? '1' : '2' });
