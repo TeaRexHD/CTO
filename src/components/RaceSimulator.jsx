@@ -5,19 +5,24 @@ import { Car } from '../engine/Car';
 import { PhysicsEngine } from '../engine/PhysicsEngine';
 import { CameraController } from '../engine/CameraController';
 import { getRandomAIProfile, CAR_COLORS } from '../engine/AIProfiles';
-import { RaceDirector } from '../engine/RaceDirector';
+import { useRaceDirector } from '../context/RaceDirectorContext';
 
 const RaceSimulator = () => {
   const mountRef = useRef(null);
+  const { raceDirector, dispatchers } = useRaceDirector();
   const [stats, setStats] = useState({
     fps: 0,
     carCount: 20,
-    cameraMode: 'topdown'
+    cameraMode: 'topdown',
+    lap: 0,
+    weather: 'clear',
+    flag: 'green',
+    sessionStatus: 'initializing'
   });
 
   useEffect(() => {
     const mount = mountRef.current;
-    if (!mount) return;
+    if (!mount || !raceDirector) return;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x87ceeb);
@@ -68,25 +73,62 @@ const RaceSimulator = () => {
       const startPosition = track.getStartingPosition(i, numCars);
       const color = CAR_COLORS[i % CAR_COLORS.length];
       const aiProfile = getRandomAIProfile();
-      
+
       const car = new Car(i, startPosition, color, aiProfile);
       cars.push(car);
       scene.add(car.mesh);
+      raceDirector.initializeCar(car.id);
     }
+
+    setStats(prev => ({ ...prev, carCount: cars.length }));
+
+    dispatchers?.onBootstrap?.({
+      lap: 12,
+      weather: 'overcast',
+      currentLapTime: 42,
+      totalRaceTime: 1800,
+      flag: 'green',
+      incidents: [
+        { type: 'yellow-flag', severity: 'Medium', location: 'Turn 6' },
+        { type: 'track-limits', severity: 'Low', carId: 2, location: 'Sector 2' }
+      ]
+    });
+
+    const metaSnapshot = raceDirector.getRaceMeta();
+    const sessionSnapshot = raceDirector.getSessionState();
+    setStats(prev => ({
+      ...prev,
+      lap: metaSnapshot.lapCount,
+      weather: metaSnapshot.weather,
+      flag: sessionSnapshot.flag,
+      sessionStatus: sessionSnapshot.status
+    }));
 
     const physicsEngine = new PhysicsEngine();
     const cameraController = new CameraController(camera);
     cameraController.setTargetCar(cars[0]);
 
-    const raceDirector = new RaceDirector();
-    cars.forEach(car => {
-      raceDirector.initializeCar(car.id);
-    });
+    const unsubscribes = [
+      raceDirector.subscribe('flagChange', session => {
+        setStats(prev => ({ ...prev, flag: session?.flag || 'green' }));
+      }),
+      raceDirector.subscribe('session', session => {
+        setStats(prev => ({ ...prev, sessionStatus: session?.status || 'running' }));
+      }),
+      raceDirector.subscribe('raceMeta', meta => {
+        setStats(prev => ({
+          ...prev,
+          lap: meta?.lapCount ?? prev.lap,
+          weather: meta?.weather ?? prev.weather
+        }));
+      })
+    ];
 
     let lastTime = performance.now();
     let frameCount = 0;
     let fpsTime = 0;
     let currentFPS = 60;
+    let animationFrameId;
 
     const animate = () => {
       const currentTime = performance.now();
@@ -107,37 +149,77 @@ const RaceSimulator = () => {
       }
 
       const waypoints = track.getWaypoints();
+      const sessionRunning = raceDirector.isSessionRunning();
+      const freezeAllCars = raceDirector.shouldFreezeCars();
+      const globalPace = raceDirector.getGlobalPaceModifier();
+      const carDirectives = new Map();
 
       cars.forEach(car => {
-        car.update(waypoints, cars);
-        physicsEngine.applyPhysics(car, deltaTime);
+        const directives = raceDirector.getCarDirectives(car.id);
+        carDirectives.set(car.id, directives);
+
+        const speedLimiter = directives.speedLimiter ?? 1;
+        const tyrePerformance = directives.tyrePerformance ?? 1;
+        const driveThroughLimiter = directives.driveThroughTimer > 0 ? directives.driveThroughLimiter ?? 0.6 : 1;
+        const baseSpeed = car.baseMaxSpeed || car.maxSpeed;
+        const adjustedSpeed = baseSpeed * globalPace * speedLimiter * tyrePerformance * driveThroughLimiter;
+        car.maxSpeed = Math.max(5, adjustedSpeed);
+
+        if (freezeAllCars || directives.frozen) {
+          car.controls.throttle = 0;
+          car.controls.brake = 1;
+          car.velocity.set(0, 0, 0);
+        }
       });
 
-      for (let i = 0; i < cars.length; i++) {
-        for (let j = i + 1; j < cars.length; j++) {
-          const collided = physicsEngine.checkCarCollision(cars[i], cars[j]);
-          raceDirector.checkCollisionIncident(cars[i], cars[j], collided);
+      if (sessionRunning && !freezeAllCars) {
+        cars.forEach(car => {
+          const directives = carDirectives.get(car.id);
+          if (directives?.frozen) return;
+
+          car.update(waypoints, cars);
+
+          if (directives?.speedLimiter < 1) {
+            car.controls.throttle = Math.min(car.controls.throttle, directives.speedLimiter);
+          }
+
+          if (directives?.driveThroughTimer > 0) {
+            car.controls.throttle = Math.min(car.controls.throttle, directives.driveThroughLimiter ?? 0.6);
+          }
+
+          physicsEngine.applyPhysics(car, deltaTime);
+        });
+
+        for (let i = 0; i < cars.length; i++) {
+          const directivesA = carDirectives.get(cars[i].id);
+          if (directivesA?.frozen) continue;
+
+          for (let j = i + 1; j < cars.length; j++) {
+            const directivesB = carDirectives.get(cars[j].id);
+            if (directivesB?.frozen) continue;
+
+            const collided = physicsEngine.checkCarCollision(cars[i], cars[j]);
+            raceDirector.checkCollisionIncident(cars[i], cars[j], collided);
+          }
         }
+
+        cars.forEach(car => {
+          physicsEngine.checkTrackBoundary(car, track);
+          raceDirector.checkTrackLimitViolation(car, track);
+        });
+
+        cars.forEach(car => {
+          raceDirector.updateTelemetry(car, deltaTime, cars, waypoints);
+        });
       }
 
-      cars.forEach(car => {
-        physicsEngine.checkTrackBoundary(car, track);
-        raceDirector.checkTrackLimitViolation(car, track);
-      });
-
-      cars.forEach(car => {
-        raceDirector.updateTelemetry(car, deltaTime, cars, waypoints);
-      });
-
       raceDirector.update(deltaTime);
-
       cameraController.update(cars, deltaTime);
-
       renderer.render(scene, camera);
-      requestAnimationFrame(animate);
+      animationFrameId = requestAnimationFrame(animate);
     };
 
-    animate();
+    animationFrameId = requestAnimationFrame(animate);
 
     const handleResize = () => {
       camera.aspect = window.innerWidth / window.innerHeight;
@@ -163,17 +245,17 @@ const RaceSimulator = () => {
     window.addEventListener('keydown', handleKeyPress);
 
     return () => {
+      unsubscribes.forEach(unsub => unsub && unsub());
+      cancelAnimationFrame(animationFrameId);
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('keydown', handleKeyPress);
-      
-      raceDirector.destroy();
-      
+
       if (mount && renderer.domElement) {
         mount.removeChild(renderer.domElement);
       }
-      
+
       renderer.dispose();
-      
+
       cars.forEach(car => {
         if (car.mesh) {
           car.mesh.traverse((child) => {
@@ -188,7 +270,7 @@ const RaceSimulator = () => {
           });
         }
       });
-      
+
       if (track.mesh) {
         track.mesh.traverse((child) => {
           if (child.geometry) child.geometry.dispose();
@@ -202,7 +284,7 @@ const RaceSimulator = () => {
         });
       }
     };
-  }, []);
+  }, [raceDirector, dispatchers]);
 
   const handleCameraChange = (mode) => {
     const event = new KeyboardEvent('keydown', { key: mode === 'topdown' ? '1' : '2' });
@@ -231,6 +313,10 @@ const RaceSimulator = () => {
           <div>FPS: {stats.fps}</div>
           <div>Cars: {stats.carCount}</div>
           <div>Camera: {stats.cameraMode}</div>
+          <div>Lap: {stats.lap}</div>
+          <div>Weather: {stats.weather}</div>
+          <div>Flag: {stats.flag}</div>
+          <div>Status: {stats.sessionStatus}</div>
           <div style={{ marginTop: '10px', fontSize: '11px' }}>
             Press C to cycle through cars in chase mode
           </div>
